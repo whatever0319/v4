@@ -4,6 +4,8 @@ import re
 import datetime
 import time
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor   # 新增✅ 
+
 
 from langchain_community.chat_models import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
@@ -17,6 +19,9 @@ from tools import (
 )
 # Optional: 如果你有 SimplePhishingAnalysis，可以保留；本版本 LLM 直接回 JSON，我們以 dict 處理
 # from models import SimplePhishingAnalysis
+
+# ✅導入 html_utils 
+from html_utils import extract_relevant_html, extract_urls
 
 # ------------------ TOOL REGISTRY & CONFIG ------------------
 TOOL_REGISTRY = {
@@ -57,13 +62,31 @@ def log_decision(record: dict):
     except Exception:
         pass
 
-def extract_visible_text(html: str) -> str:
-    html = re.sub(r"<(script|style|meta|link|noscript)[^>]*>.*?</\1>", "", html, flags=re.DOTALL)
-    blocks = re.findall(r">(.*?)<", html)
-    return "\n".join(x.strip() for x in blocks if x.strip())
+# ✅ 新增：並行工具執行函式
+def execute_tools_parallel(calls):
+    """並行執行工具呼叫"""
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {}
+        for call in calls:
+            tool_name = call["tool"]
+            args = call.get("args", {}) or {}
+            func = TOOL_REGISTRY.get(tool_name)
+            
+            if func:
+                # 提交任務到執行緒池
+                future = executor.submit(func.invoke, args)
+                futures[future] = tool_name
+        
+        # 收集結果
+        evidence = {}
+        for future in futures:
+            tool_name = futures[future]
+            try:
+                evidence[tool_name] = future.result()
+            except Exception as e:
+                evidence[tool_name] = {"error": str(e)}
+        return evidence
 
-def find_urls(text: str) -> list:
-    return [m.group(1).rstrip('.,;') for m in re.finditer(r"(?i)\b((?:https?://|www\.)\S+)", text)]
 
 def domain_of(url: str) -> str:
     try:
@@ -139,12 +162,14 @@ def collect_tool_evidence(urls: list, visible: str) -> dict:
         "planner_calls": calls
     })
 
-    # execute calls and collect evidence
-    evidence = {}
+    # execute calls and collect evidence - 並行版本 ✅
+    # 先處理參數自動填充
+    filled_calls = []
     for call in calls:
         tool_name = call["tool"]
         args = call.get("args", {}) or {}
-        # autofill
+        
+        # autofill (保持原有的自動填充邏輯)
         if tool_name == "check_url_safety" and not args.get("url") and urls:
             args["url"] = urls[0]
         if tool_name == "analyze_domain_age" and not args.get("domain") and urls:
@@ -153,13 +178,11 @@ def collect_tool_evidence(urls: list, visible: str) -> dict:
             args["urls"] = urls or []
         if tool_name in ("extract_contact_info","detect_language_anomaly") and not args.get("text"):
             args["text"] = visible[:2000]
+        
+        filled_calls.append({"tool": tool_name, "args": args})
 
-        func = TOOL_REGISTRY.get(tool_name)
-        try:
-            res = func(**args)
-        except Exception as e:
-            res = {"error": str(e)}
-        evidence[tool_name] = res
+    # 並行執行所有工具
+    evidence = execute_tools_parallel(filled_calls)
 
     log_decision({
         "time": datetime.datetime.utcnow().isoformat(),
@@ -279,8 +302,9 @@ def build_analysis_chain():
 # ------------------ ANALYZE (主流程) ------------------
 def analyze_deep(html_text: str) -> dict:
     start = time.time()
-    visible = extract_visible_text(html_text)
-    urls = find_urls(html_text)
+    # ✅ 使用 html_utils 
+    visible = extract_relevant_html(html_text)
+    urls = extract_urls(html_text)
     urls_str = "\n".join(urls[:10]) if urls else "（無網址）"
 
     # Collect evidence
