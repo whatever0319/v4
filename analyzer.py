@@ -245,12 +245,45 @@ def rule_score(visible: str, urls: list, evidence: dict) -> dict:
     # clamp and return
     return {"score": max(score, 0), "reasons": reasons, "hard_flag": hard_flag}
 
-# ------------------ LLM CHAIN (analysis) ------------------
+# ------------------ LLM CHAIN (analysis with Chain-of-Thought) ------------------
+def build_cot_thinking_chain():
+    """第一步：讓 LLM 進行自由文字思考（較高 temperature）"""
+    llm = ChatOllama(model=MODEL_NAME, temperature=0.5)  # Higher temperature for exploration
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+你是一個資安分析 AI。請逐步分析以下信息，並詳細說明你的推理過程。
+請自由地表達你的思考，不要限制於任何特定格式，就像在進行內部推理。
+
+你需要考慮以下幾個方面：
+1. 內文中的可疑特徵（緊急語氣、身份驗證要求、金錢相關等）
+2. URL 的特徵（域名、TLD、可疑模式等）
+3. 工具檢測結果中的警告標記
+4. 整體綜合判斷
+
+請逐點列出你的觀察和推理。
+"""),
+        ("human", """
+=== 網頁內文 ===
+{visible_text}
+
+=== URL ===
+{urls}
+
+=== 工具檢測結果 ===
+{evidence}
+
+請詳細說明你的分析思路和推理過程，但請勿直接給出結論。
+""")
+    ])
+    return prompt | llm
+
+
 def build_analysis_chain():
+    """第二步：基於 CoT 思考結果，給出嚴格 JSON 判斷"""
     llm = ChatOllama(model=MODEL_NAME, temperature=0)  # deterministic
     prompt = ChatPromptTemplate.from_messages([
         ("system", """
-你是一個資安分析 AI，請基於內文、URL 與工具檢測結果進行分析並回傳 JSON。
+你是一個資安分析 AI，請基於前面的思考過程進行最終判斷。
 請嚴格回傳 JSON（只輸出 JSON），格式如下（務必使用合法 JSON）：
 {{
     "is_potential_phishing": true/false,
@@ -258,7 +291,7 @@ def build_analysis_chain():
     "explanation": ["短理由一","短理由二"],
     "confidence": 0-100
 }}
-只根據提供的 evidence 與內文進行判斷，不要加入外部未提供資訊。
+只根據提供的思考過程與原始內文進行判斷，不要加入外部未提供資訊。
 若不確定，請給出中間值 confidence 並用 "medium"。
 """),
         ("human", """
@@ -271,7 +304,10 @@ def build_analysis_chain():
 === 工具檢測結果 ===
 {evidence}
 
-請根據上面三項回傳 JSON。
+=== 先前的推理過程 ===
+{cot_thinking}
+
+基於以上思考過程，請給出最終的 JSON 判斷。
 """)
     ])
     return prompt | llm
@@ -302,13 +338,35 @@ def analyze_deep(html_text: str) -> dict:
 
     evidence_text = serialize_evidence(evidence)
 
-    # Call LLM
-    chain = build_analysis_chain()
+    # ========== STEP 1: Chain-of-Thought (Thinking) ==========
+    cot_thinking = ""
     try:
+        cot_chain = build_cot_thinking_chain()
+        cot_resp = cot_chain.invoke({
+            "visible_text": visible[:3000],
+            "urls": urls_str,
+            "evidence": evidence_text,
+        })
+        cot_thinking = cot_resp.content if hasattr(cot_resp, "content") else str(cot_resp)
+        
+        log_decision({
+            "time": datetime.datetime.utcnow().isoformat(),
+            "phase": "cot_thinking",
+            "cot_output": cot_thinking[:1000]  # 記錄前 1000 字
+        })
+    except Exception as e:
+        cot_thinking = f"推理過程出錯：{str(e)}"
+        log_decision({"time": datetime.datetime.utcnow().isoformat(), "phase": "cot_error", "error": str(e)})
+
+    # ========== STEP 2: Final Analysis (JSON) ==========
+    content = ""
+    try:
+        chain = build_analysis_chain()
         resp = chain.invoke({
             "visible_text": visible[:3000],
             "urls": urls_str,
             "evidence": evidence_text,
+            "cot_thinking": cot_thinking,
         })
         content = resp.content if hasattr(resp, "content") else str(resp)
     except Exception as e:
@@ -380,6 +438,7 @@ def analyze_deep(html_text: str) -> dict:
         "urls": urls[:5],
         "evidence": evidence,
         "rule": r,
+        "cot_thinking": cot_thinking[:500],  # 記錄思考過程
         "llm_raw": content,
         "final": {
             "is_potential_phishing": final_decision,
@@ -396,5 +455,6 @@ def analyze_deep(html_text: str) -> dict:
         "confidence": final_conf,
         "explanation": final_explanations[:3],
         "evidence": evidence,
+        "cot_thinking": cot_thinking[:800],  # 返回推理過程摘要（可選用於調試）
         "elapsed_time": elapsed
     }
