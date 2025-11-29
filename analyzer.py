@@ -5,7 +5,7 @@ import datetime
 import time
 from urllib.parse import urlparse
 
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 
 from tools import (
@@ -156,7 +156,11 @@ def collect_tool_evidence(urls: list, visible: str) -> dict:
 
         func = TOOL_REGISTRY.get(tool_name)
         try:
-            res = func(**args)
+            # 工具由 @tool 裝飾，需調用其 invoke 方法
+            if hasattr(func, 'invoke'):
+                res = func.invoke(args)
+            else:
+                res = func(**args)
         except Exception as e:
             res = {"error": str(e)}
         evidence[tool_name] = res

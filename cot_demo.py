@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Chain-of-Thought 演示腳本
 
@@ -10,6 +11,14 @@ Chain-of-Thought 演示腳本
 """
 
 import json
+import sys
+import os
+
+# 修正 Windows 編碼問題
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
 from analyzer import analyze_deep
 
 # 測試案例 1：看起來像釣魚郵件的 HTML
