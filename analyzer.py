@@ -442,7 +442,7 @@ def analyze_deep(html_text: str) -> dict:
         "urls": urls[:5],
         "evidence": evidence,
         "rule": r,
-        "cot_thinking": cot_thinking[:500],  # 記錄思考過程
+        "cot_thinking": cot_thinking[:500],  # 記錄思考過程（前 500 字）
         "llm_raw": content,
         "final": {
             "is_potential_phishing": final_decision,
@@ -459,6 +459,6 @@ def analyze_deep(html_text: str) -> dict:
         "confidence": final_conf,
         "explanation": final_explanations[:3],
         "evidence": evidence,
-        "cot_thinking": cot_thinking[:800],  # 返回推理過程摘要（可選用於調試）
+        "cot_thinking": cot_thinking,  # 完整思考過程直接回傳
         "elapsed_time": elapsed
     }
