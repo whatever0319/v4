@@ -21,6 +21,16 @@ from analyzer import analyze_deep
 app = Flask(__name__)
 CORS(app)
 
+# Background task support for async analysis
+from concurrent.futures import ThreadPoolExecutor
+import uuid
+from threading import Lock
+
+# Simple in-memory store: task_id -> {status: processing|done|error, result: dict or None}
+TASKS = {}
+TASKS_LOCK = Lock()
+EXECUTOR = ThreadPoolExecutor(max_workers=2)
+
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
     load_blacklist("phishtank.csv")
 
@@ -60,6 +70,8 @@ def analyze_route():
     t0 = time.time()
     data = request.json or {}
     text = data.get("text", "")
+    # 前端可透過 include_cot 控制是否要完整的思考過程（預設 True）
+    include_cot = bool(data.get("include_cot", True))
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log("收到分析請求")
@@ -88,9 +100,15 @@ def analyze_route():
     cleaned = extract_relevant_html(text) if "<html" in text.lower() else text
     result = analyze_deep(cleaned)
 
-    #非黑名單也要固定回這兩欄，讓前端好判斷
+    # 非黑名單也要固定回這兩欄，讓前端好判斷
     result["is_blacklisted"] = False
     result["blacklist_source"] = None
+
+    # 如果前端不需要完整 CoT，移除大型欄位以節省頻寬
+    if not include_cot:
+        # 保留摘要欄位，但刪除完整版（若存在）
+        if "cot_thinking_full" in result:
+            del result["cot_thinking_full"]
 
     elapsed = round(result["elapsed_time"], 2)
     log("分析完成（深度檢測）")
@@ -98,6 +116,47 @@ def analyze_route():
     print(f"分析結果：{result['is_potential_phishing']}")
 
     return jsonify(result)
+
+
+@app.route("/analyze_async", methods=["POST"])
+def analyze_async_route():
+    """Start analysis in background and return a task_id immediately.
+
+    Frontend can poll `/analyze_result/<task_id>` to get status/result.
+    """
+    data = request.json or {}
+    text = data.get("text", "")
+    include_cot = bool(data.get("include_cot", True))
+
+    task_id = str(uuid.uuid4())
+    with TASKS_LOCK:
+        TASKS[task_id] = {"status": "processing", "result": None}
+
+    def _run_and_store(tid, txt, icot):
+        try:
+            res = analyze_deep(txt)
+            # remove full cot if frontend didn't request it
+            if not icot and "cot_thinking_full" in res:
+                del res["cot_thinking_full"]
+            with TASKS_LOCK:
+                TASKS[tid]["status"] = "done"
+                TASKS[tid]["result"] = res
+        except Exception as e:
+            with TASKS_LOCK:
+                TASKS[tid]["status"] = "error"
+                TASKS[tid]["result"] = {"error": str(e)}
+
+    EXECUTOR.submit(_run_and_store, task_id, text, include_cot)
+    return jsonify({"task_id": task_id, "status": "processing"})
+
+
+@app.route("/analyze_result/<task_id>", methods=["GET"])
+def analyze_result_route(task_id):
+    with TASKS_LOCK:
+        info = TASKS.get(task_id)
+    if not info:
+        return jsonify({"error": "unknown task_id"}), 404
+    return jsonify(info)
 
 if __name__ == "__main__":
     print("Flask 後端啟動中（Debug Mode）...")
