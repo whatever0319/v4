@@ -403,8 +403,8 @@ def analyze_deep(html_text: str) -> dict:
     except Exception:
         parsed = {"is_potential_phishing": False, "risk_level": "low", "explanation": ["AI 判斷正常或回傳錯誤"], "confidence": 30}
 
-    # RULE-OVERRIDE LOGIC (rule has priority)
-    # If hard_flag -> force high risk
+    # RULE-CONFIDENCE HYBRID LOGIC
+    # 根據模型信心決定 rule engine 的優先級
     final_decision = parsed.get("is_potential_phishing", False)
     final_level = parsed.get("risk_level", "low")
     final_conf = parsed.get("confidence", 30)
@@ -412,36 +412,61 @@ def analyze_deep(html_text: str) -> dict:
     if isinstance(final_explanations, str):
         final_explanations = re.split(r"[,、;，]", final_explanations)
 
-    # If rule says hard_flag, override
+    model_confidence = final_conf  # 記錄模型原始信心
+    
+    # 信心閾值：70% 為分界線
+    CONFIDENCE_THRESHOLD = 70
+    
+    # CASE 1: 硬規則（hard_flag）總是強制執行，無視模型信心
     if hard_flag:
         final_decision = True
         final_level = "high"
         final_conf = max(final_conf, 85)
-        final_explanations = ["規則判定：身份驗證+緊急語氣（強制）"] + final_explanations
+        final_explanations = ["✓ 規則判定：身份驗證+緊急語氣（強制優先）"] + final_explanations
 
-    # If rule score high enough, override/boost
-    if score >= 6 and not final_decision:
-        final_decision = True
-        final_level = "high"
-        final_conf = max(final_conf, 80)
-        final_explanations = ["規則分數高（{} 分）".format(score)] + final_explanations
-    elif 4 <= score < 6:
-        # medium
-        if final_level == "low":
+    # CASE 2: 模型信心高（≥ 70%）-> 模型判斷優先，rule 只提供補充理由
+    elif model_confidence >= CONFIDENCE_THRESHOLD:
+        # 模型高信心判斷保持不變，但可以由 rule 提供額外證據
+        if score >= 6:
+            final_explanations = final_explanations + [f"⚠ 規則系統同時標記高風險（評分 {score}/10）"]
+        elif score >= 4:
+            final_explanations = final_explanations + [f"⚠ 規則系統檢測到中度風險（評分 {score}/10）"]
+        # 模型決策保持不變，信心也不變（或略微提升）
+        final_conf = min(final_conf + 5, 99)  # 稍微提升，最多 99%
+
+    # CASE 3: 模型信心低（< 70%）-> rule engine 可以建議或調整
+    else:
+        # 如果 rule 強烈標記（hard_flag 已處理），或 rule 分數很高
+        if score >= 7:
+            # rule 分數很高，且模型信心低 -> 跟隨 rule，但在 explanation 中註明
+            final_decision = True
+            final_level = "high"
+            final_conf = 75  # 根據 rule 給予 75% 信心
+            final_explanations = [f"📋 規則分析建議（評分 {score}/10，模型信心{model_confidence}%）"] + final_explanations
+
+        elif score >= 5 and not final_decision:
+            # rule 中等風險，模型說安全但信心低 -> 調整到 medium
             final_level = "medium"
-        final_conf = max(final_conf, 55)
-        final_explanations = final_explanations or ["規則分數提示中度風險"]
+            final_conf = 55
+            final_explanations = [f"📋 規則系統檢測中度風險（評分 {score}/10）"] + final_explanations
 
-    # If LLM says safe but evidence contains suspicious domain -> boost suspicion
-    if not final_decision:
-        for u in urls:
-            d = domain_of(u)
-            if is_suspicious_tld(d) or contains_brand_typo(d):
-                final_decision = True
-                final_level = "high"
-                final_conf = max(final_conf, 75)
-                final_explanations = [f"域名疑似高風險：{d}"] + final_explanations
-                break
+        elif score >= 4 and not final_decision:
+            # rule 輕微風險，模型說安全但信心低 -> 稍微提升風險等級
+            if final_level == "low":
+                final_level = "medium"
+            final_conf = 50
+            final_explanations = [f"📋 規則檢測到潛在風險（評分 {score}/10）"] + final_explanations
+
+        # 域名檢查：只在模型信心低時應用
+        if not final_decision or final_conf < 60:
+            for u in urls:
+                d = domain_of(u)
+                if is_suspicious_tld(d) or contains_brand_typo(d):
+                    final_decision = True
+                    final_level = "high"
+                    final_conf = 75
+                    final_explanations = [f"🔴 域名疑似高風險：{d}"] + final_explanations
+                    break
 
     # Normalize
     final_explanations = [e.strip() for e in final_explanations if str(e).strip()]
