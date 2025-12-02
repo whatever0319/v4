@@ -215,17 +215,20 @@ def rule_score(visible: str, urls: list, evidence: dict) -> dict:
         d = domain_of(u)
         if not d:
             continue
+        # 優先採用安全規則：如果是安全域名，跳過可疑檢查
         if is_safe_domain(d):
             reasons.append(f"安全域名：{d}")
-            # small negative score (makes it safer)
+            # 對安全域名減分（降低風險）
             score -= 1
-        if is_suspicious_tld(d) or contains_brand_typo(d) or any(x in d for x in ["verify", "secure", "account", "login", "update", "reset"]):
-            score += 4
-            reasons.append(f"疑似可疑域名：{d}")
-        # very high risk for credential phishing patterns
-        if any(x in d for x in ["-secure-", "login-", "verify-", "account-"]):
-            score += 5
-            reasons.append(f"域名含 phishing pattern：{d}")
+        else:
+            # 只在非安全域名時才檢查可疑特徵
+            if is_suspicious_tld(d) or contains_brand_typo(d) or any(x in d for x in ["verify", "secure", "account", "login", "update", "reset"]):
+                score += 4
+                reasons.append(f"疑似可疑域名：{d}")
+            # very high risk for credential phishing patterns
+            if any(x in d for x in ["-secure-", "login-", "verify-", "account-"]):
+                score += 5
+                reasons.append(f"域名含 phishing pattern：{d}")
 
     # Evidence-based bumps (tools)
     for k, v in evidence.items():
