@@ -270,3 +270,95 @@ def detect_language_anomaly(text: str) -> str:
 #
 # 這些工具可以讓模型在分析過程中主動調用，獲取更多資訊來做出更準確的判斷。
 
+
+def detect_suspicious_js(html_text: str) -> dict:
+    """
+    檢測 HTML 中是否包含可疑的 JavaScript 代碼。
+    
+    不標記不完整/minified 程式碼為惡意，只標記真正可疑的混淆與動態注入。
+    
+    Args:
+        html_text: HTML 內容
+        
+    Returns:
+        {
+            "has_suspicious_js": bool,
+            "findings": [list of suspicious patterns found],
+            "severity": "none" | "low" | "medium" | "high"
+        }
+    """
+    if not html_text:
+        return {"has_suspicious_js": False, "findings": [], "severity": "none"}
+    
+    findings = []
+    severity_score = 0
+    
+    # 1. 檢查高風險函數：eval, atob, Function constructor
+    if re.search(r'\beval\s*\(', html_text):
+        findings.append("包含 eval() 動態執行代碼")
+        severity_score += 3
+    
+    if re.search(r'\batob\s*\(', html_text):
+        findings.append("包含 atob() Base64 解碼")
+        severity_score += 2
+    
+    if re.search(r'\bnew\s+Function\s*\(', html_text):
+        findings.append("包含 Function constructor 動態生成代碼")
+        severity_score += 3
+    
+    # 2. 檢查動態注入
+    if re.search(r'innerHTML\s*=', html_text):
+        findings.append("包含 innerHTML 動態注入")
+        severity_score += 2
+    
+    if re.search(r'document\.write\s*\(', html_text):
+        findings.append("包含 document.write 動態注入")
+        severity_score += 2
+    
+    if re.search(r'insertAdjacentHTML\s*\(', html_text):
+        findings.append("包含 insertAdjacentHTML 動態注入")
+        severity_score += 2
+    
+    # 3. 檢查混淆特徵（明顯的混淆編碼）
+    # 大量 String.fromCharCode - 通常用於隱藏代碼
+    fromcharcode_count = len(re.findall(r'String\.fromCharCode\s*\(', html_text))
+    if fromcharcode_count >= 3:  # 3 個以上才算可疑
+        findings.append(f"大量使用 String.fromCharCode ({fromcharcode_count} 次，通常用於混淆)")
+        severity_score += fromcharcode_count
+    
+    # 明顯的十六進位混淆變數：_0x開頭的變數名大量出現
+    hex_var_count = len(re.findall(r'_0x[a-f0-9]+', html_text))
+    if hex_var_count >= 5:  # 5 個以上的十六進位變數
+        findings.append(f"檢測到大量十六進位混淆變數 ({hex_var_count} 個，通常用於隱藏代碼)")
+        severity_score += 2
+    
+    # 4. 檢查自我解密腳本特徵
+    # 尋找 replace, split, substring 等字符串操作的組合
+    deobf_patterns = [
+        r'\.replace\s*\([^,]+,\s*["\']',  # replace with string
+        r'\.split\s*\([^)]+\)\s*\.join',   # split-join pattern
+        r'String\.fromCharCode.*\.charCodeAt',  # 編解碼組合
+    ]
+    for pattern in deobf_patterns:
+        if re.search(pattern, html_text):
+            findings.append("檢測到自我解密腳本特徵")
+            severity_score += 2
+            break
+    
+    # 判定嚴重程度
+    if severity_score == 0:
+        severity = "none"
+    elif severity_score <= 2:
+        severity = "low"
+    elif severity_score <= 5:
+        severity = "medium"
+    else:
+        severity = "high"
+    
+    return {
+        "has_suspicious_js": len(findings) > 0,
+        "findings": findings,
+        "severity": severity
+    }
+
+

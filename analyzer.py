@@ -244,6 +244,20 @@ def rule_score(visible: str, urls: list, evidence: dict) -> dict:
                 score += 3
                 reasons.append(f"{k}：網域年齡小於90天")
 
+    # JS 混淆檢測
+    from tools import detect_suspicious_js
+    html_sample = visible  # 使用可見文字作為檢測樣本
+    js_result = detect_suspicious_js(html_sample)
+    if js_result["has_suspicious_js"]:
+        if js_result["severity"] == "high":
+            score += 5
+        elif js_result["severity"] == "medium":
+            score += 3
+        elif js_result["severity"] == "low":
+            score += 1
+        reasons.append(f"檢測到可疑 JavaScript：{'; '.join(js_result['findings'])}")
+    
+
     # Hard rules: if both auth + urgent present -> high risk regardless
     if cnt_auth >= 1 and cnt_urgent >= 1:
         hard_flag = True
