@@ -8,24 +8,20 @@ from urllib.parse import urlparse
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 
-from tools import (
-    check_url_safety,
-    analyze_domain_age,
-    check_url_patterns,
-    extract_contact_info,
-    detect_language_anomaly,
-)
+# 將 tools 的導入暫時註解掉（由於需要停用工具呼叫）
+# from tools import (
+#     check_url_safety,
+#     analyze_domain_age,
+#     check_url_patterns,
+#     extract_contact_info,
+#     detect_language_anomaly,
+# )
 # Optional: 如果你有 SimplePhishingAnalysis，可以保留；本版本 LLM 直接回 JSON，我們以 dict 處理
 # from models import SimplePhishingAnalysis
 
 # ------------------ TOOL REGISTRY & CONFIG ------------------
-TOOL_REGISTRY = {
-    "check_url_safety": check_url_safety,
-    "analyze_domain_age": analyze_domain_age,
-    "check_url_patterns": check_url_patterns,
-    "extract_contact_info": extract_contact_info,
-    "detect_language_anomaly": detect_language_anomaly,
-}
+# 工具呼叫暫時停用：將 TOOL_REGISTRY 保持為空，並註解原始工具導入。
+TOOL_REGISTRY = {}
 
 SAFE_DOMAINS = {"google.com", "google.com.tw", "microsoft.com", "facebook.com", "github.com", "gov.tw", "edu.tw"}
 SUSPICIOUS_TLDS = {".xyz", ".top", ".loan", ".vip", ".click", ".buzz", ".shop", ".loan", ".info", ".ru", ".tk"}
@@ -106,73 +102,17 @@ def validate_plan(raw_plan: dict) -> list:
 
 def collect_tool_evidence(urls: list, visible: str) -> dict:
     """
-    Planner-driven tool invocation with fallback heuristics.
-    Returns a dict of tool_name -> result
+    工具調用已被暫時停用。
+    目前直接回傳空的 evidence dict，並在日誌中記錄此狀態以便追蹤。
     """
-    urls_for_plan = "\n".join(urls[:10]) if urls else ""
-    planner = plan_prompt | planner_llm
-
-    # decide calls
-    calls = []
-    try:
-        plan_resp = planner.invoke({"visible": visible[:2000], "urls": urls_for_plan})
-        content = plan_resp.content if hasattr(plan_resp, "content") else str(plan_resp)
-        m = re.search(r"(\{[\s\S]*\})", content)
-        json_text = m.group(1) if m else content
-        raw = json.loads(json_text)
-        calls = validate_plan(raw)
-    except Exception:
-        calls = []
-
-    # fallback: if no calls and URL suspicious, at least check url patterns & domain age
-    if not calls and urls and not is_safe_domain(domain_of(urls[0])):
-        calls = [
-            {"tool":"check_url_patterns","args":{"urls": urls}},
-            {"tool":"analyze_domain_age","args":{"domain": domain_of(urls[0])}}
-        ]
-
     log_decision({
         "time": datetime.datetime.utcnow().isoformat(),
-        "phase": "planner",
+        "phase": "planner_disabled",
         "visible_snippet": visible[:300],
         "urls": urls[:3],
-        "planner_calls": calls
+        "note": "工具調用已停用（collect_tool_evidence stub）"
     })
-
-    # execute calls and collect evidence
-    evidence = {}
-    for call in calls:
-        tool_name = call["tool"]
-        args = call.get("args", {}) or {}
-        # autofill
-        if tool_name == "check_url_safety" and not args.get("url") and urls:
-            args["url"] = urls[0]
-        if tool_name == "analyze_domain_age" and not args.get("domain") and urls:
-            args["domain"] = domain_of(urls[0])
-        if tool_name == "check_url_patterns" and not args.get("urls"):
-            args["urls"] = urls or []
-        if tool_name in ("extract_contact_info","detect_language_anomaly") and not args.get("text"):
-            args["text"] = visible[:2000]
-
-        func = TOOL_REGISTRY.get(tool_name)
-        try:
-            # 工具由 @tool 裝飾，需調用其 invoke 方法
-            if hasattr(func, 'invoke'):
-                res = func.invoke(args)
-            else:
-                res = func(**args)
-        except Exception as e:
-            res = {"error": str(e)}
-        evidence[tool_name] = res
-
-    log_decision({
-        "time": datetime.datetime.utcnow().isoformat(),
-        "phase": "evidence",
-        "visible_snippet": visible[:300],
-        "urls": urls[:3],
-        "evidence": evidence
-    })
-    return evidence
+    return {}
 
 # ------------------ RULE-BASED SCORING ------------------
 def rule_score(visible: str, urls: list, evidence: dict) -> dict:
